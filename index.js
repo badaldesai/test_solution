@@ -1,42 +1,49 @@
+class ConnectError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ConnectError';
+    this.message = 'connection failed';
+  }
+}
+
 const pooledDownload = async (connect, save, downloadList, maxConcurrency) => {
-  let activeDownloads = 0;
   let downloadIndex = 0;
-  let connectionFailed = false;
-  const downloadFile = async (connection, url) => {
-    const { download } = connection;
+  const connections = [];
+
+  for (let i = 0; i < maxConcurrency; i++) {
     try {
-      const result = await download(url);
-      await save(result);
+      const connection = await connect();
+      connections.push(connection);
+    } catch (error) {
+      if (connections.length === 0) {
+        throw new ConnectError();
+      }
+      break;
+    }
+  }
+
+  const startDownload = async (connection) => {
+    try {
+      while (downloadIndex < downloadList.length) {
+        const url = downloadList[downloadIndex];
+        downloadIndex++;
+        const { download } = connection;
+        const result = await download(url);
+        await save(result);
+      }
     } catch (error) {
       throw error;
-    }
-  }
-
-  const startDownload = async () => {
-    while (downloadIndex < downloadList.length && !connectionFailed) {
-      let connection;
-      if (activeDownloads >= maxConcurrency) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        continue;
-      }
-      try {
-        connection = await connect();
-      } catch (error) {
-        connectionFailed = true;
-        throw new Error('connection failed');
-      }
-      const url = downloadList[downloadIndex];
-      downloadIndex++;
-      activeDownloads++;
-      await downloadFile(connection, url);
+    } finally {
       await connection.close();
-      activeDownloads--;
     }
   }
-  const workers = Array.from({ length: maxConcurrency }, startDownload);
-
+  
   try {
-    await Promise.all(workers);
+    const promises = await Promise.allSettled(connections.map((connection) => startDownload(connection)));
+    const allFullfilled = promises.every((promise) => promise.status === 'fulfilled');
+    if (!allFullfilled) {
+      throw promises[0].reason;
+    }
   } catch (error) {
     throw error;
   }
